@@ -1,0 +1,17 @@
+.termiccio-terminal .xterm-viewport {
+  border-radius: 15px;
+}
+
+.termiccio-terminal .terminal {
+  padding: 20px;
+}
+
+.termiccio-terminal {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 800px;
+  border-radius: 15px;
+  overflow: hidden;
+  box-shadow: 0 0 20px rgba(0, 0, 0, 0.2);
+}
