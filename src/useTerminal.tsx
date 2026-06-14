@@ -141,16 +141,16 @@ function useAutoFitAddon(initialHeight: number, padding: number) {
 
   const setTerminalHeight = useCallback(
     (height: number) => {
-      setTerminalRowHeight((rowHeight) => {
-        if (!rowHeight) return rowHeight;
+      setTerminalHeightInternal((currentHeight) => {
+        if (!terminalRowHeight) return currentHeight;
         return (
-          Math.floor((height + rowHeight / 2 - 2 * padding) / rowHeight) *
-            rowHeight +
+          Math.floor((height + terminalRowHeight / 2 - 2 * padding) / terminalRowHeight) *
+            terminalRowHeight +
           2 * padding
         );
       });
     },
-    [padding],
+    [padding, terminalRowHeight],
   );
 
   useEffect(() => {

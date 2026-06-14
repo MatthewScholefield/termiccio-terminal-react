@@ -1,6 +1,6 @@
 {
   "name": "termiccio-terminal-react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React hooks and components for connecting a frontend to a termiccio-terminal FastAPI backend over WebSockets using xterm.js.",
   "type": "module",
   "license": "MIT",
