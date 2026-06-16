@@ -100,7 +100,7 @@ export interface UseTerminalOptions {
   lightTheme?: ITheme;
   /** Extra xterm.js options merged on top of the defaults. */
   terminalOptions?: Partial<ITerminalOptions>;
-  /** Replay buffered output via `update_id` on reconnect. Default true. */
+  /** Restore missed output via `update_id` on reconnect. Default true. */
   bufferReplay?: boolean;
   /**
    * Forward ordinary printable keydown events directly to stdin instead of
@@ -555,6 +555,12 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
             if (message.update_id > lastUpdateIdRef.current) {
               lastUpdateIdRef.current = message.update_id;
             }
+            term.write(message.data);
+            break;
+          }
+          case "snapshot": {
+            term.reset();
+            lastUpdateIdRef.current = message.update_id;
             term.write(message.data);
             break;
           }

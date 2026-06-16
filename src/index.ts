@@ -31,6 +31,7 @@ export type {
   GetSizeTerminalMessage,
   ClientTerminalMessage,
   OutputTerminalMessage,
+  SnapshotTerminalMessage,
   SizeTerminalMessage,
   CommandFinishTerminalMessage,
   ErrorTerminalMessage,

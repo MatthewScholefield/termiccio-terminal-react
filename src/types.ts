@@ -36,6 +36,15 @@ export interface OutputTerminalMessage {
   update_id: number;
 }
 
+export interface SnapshotTerminalMessage {
+  type: "snapshot";
+  format: "xterm-serialize-v1";
+  data: string;
+  update_id: number;
+  rows: number;
+  cols: number;
+}
+
 export interface SizeTerminalMessage {
   type: "size";
   rows: number;
@@ -61,6 +70,7 @@ export interface ErrorTerminalMessage {
 
 export type ServerTerminalMessage =
   | OutputTerminalMessage
+  | SnapshotTerminalMessage
   | SizeTerminalMessage
   | CommandFinishTerminalMessage
   | SessionExitTerminalMessage
