@@ -7,6 +7,7 @@ export {
   type UseTerminalResult,
   type RunCommandFunction,
   type OnTerminalInputFunction,
+  type KeyboardInputTransformFunction,
 } from "./useTerminal";
 
 export {

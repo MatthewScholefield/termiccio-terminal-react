@@ -19,6 +19,9 @@ export const TERMINAL_CONTAINER_CLASS = "termiccio-terminal";
 
 export type RunCommandFunction = (command: string) => Promise<number>;
 export type OnTerminalInputFunction = (input: string) => void;
+export type KeyboardInputTransformFunction = (
+  event: KeyboardEvent,
+) => string | null | undefined;
 
 export const DEFAULT_DARK_THEME: ITheme = {
   background: "#1e1e1e",
@@ -93,6 +96,29 @@ export interface UseTerminalOptions {
   terminalOptions?: Partial<ITerminalOptions>;
   /** Replay buffered output via `update_id` on reconnect. Default true. */
   bufferReplay?: boolean;
+  /**
+   * Forward ordinary printable keydown events directly to stdin instead of
+   * letting the browser's textarea/composition path aggregate them. This is
+   * useful for terminal UIs that need every typed character immediately.
+   *
+   * IME/dead-key composition and modified keys still use xterm.js's native
+   * handling.
+   */
+  directKeyboardInput?: boolean;
+  /**
+   * Use an `<input type="password">` instead of xterm.js's hidden `<textarea>`
+   * for capturing keyboard input. Some browsers/OS keyboards only fully
+   * disable predictive text and composition-style suggestions for password
+   * fields.
+   */
+  passwordInput?: boolean;
+  /**
+   * Transform native keydown events before xterm.js handles them.
+   *
+   * Return a string to send that data to stdin, null to swallow the event, or
+   * undefined to keep the default terminal behavior.
+   */
+  keyboardInputTransform?: KeyboardInputTransformFunction;
 }
 
 export interface UseTerminalResult {
@@ -104,6 +130,8 @@ export interface UseTerminalResult {
   sessionId: string | null;
   /** Run a command and resolve with its exit code once `command_finish` arrives. */
   runCommand: RunCommandFunction;
+  /** Send raw input data to the terminal stdin stream. */
+  sendInput: (data: string) => void;
   /** Subscribe to raw stdin input produced in the terminal. */
   useOnTerminalInput: (
     handler: OnTerminalInputFunction,
@@ -134,10 +162,60 @@ function getPrefersDarkMode(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
-function useAutoFitAddon(initialHeight: number, padding: number) {
+function hardenTerminalTextarea(textarea: HTMLTextAreaElement | undefined) {
+  if (!textarea) return;
+  textarea.setAttribute("autocomplete", "off");
+  textarea.setAttribute("autocorrect", "off");
+  textarea.setAttribute("autocapitalize", "off");
+  textarea.setAttribute("spellcheck", "false");
+  textarea.setAttribute("data-gramm", "false");
+  textarea.setAttribute("data-gramm_editor", "false");
+  textarea.setAttribute("data-enable-grammarly", "false");
+  textarea.setAttribute("data-lt-active", "false");
+  textarea.setAttribute("data-lpignore", "true");
+  textarea.setAttribute("data-1p-ignore", "true");
+}
+
+function shouldDirectlySendKey(event: KeyboardEvent): boolean {
+  if (event.defaultPrevented) return false;
+  if (event.ctrlKey || event.altKey || event.metaKey) return false;
+  if (event.isComposing || event.keyCode === 229) return false;
+  return event.key.length === 1;
+}
+
+function openTerminal(term: Terminal, anchorElem: HTMLDivElement, passwordInput: boolean) {
+  if (!passwordInput) {
+    term.open(anchorElem);
+    return;
+  }
+
+  const document = anchorElem.ownerDocument;
+  const createElement = document.createElement.bind(document);
+  let didCreateInput = false;
+
+  document.createElement = ((tagName: string, options?: ElementCreationOptions) => {
+    if (!didCreateInput && tagName.toLowerCase() === "textarea") {
+      didCreateInput = true;
+      const input = createElement("input", options) as HTMLInputElement;
+      input.type = "password";
+      hardenTerminalTextarea(input as unknown as HTMLTextAreaElement);
+      return input;
+    }
+    return createElement(tagName, options);
+  }) as Document["createElement"];
+
+  try {
+    term.open(anchorElem);
+  } finally {
+    document.createElement = createElement as Document["createElement"];
+  }
+}
+
+function useAutoFitAddon(initialHeight: number, padding: number, passwordInput: boolean) {
   const [terminalRowHeight, setTerminalRowHeight] = useState(0);
   const [terminalHeight, setTerminalHeightInternal] = useState(0);
   const currentDimensionsRef = useRef<[number, number]>([80, 24]);
+  const fitAddonRef = useRef<FitAddon | null>(null);
 
   const setTerminalHeight = useCallback(
     (height: number) => {
@@ -163,11 +241,22 @@ function useAutoFitAddon(initialHeight: number, padding: number) {
     }
   }, [terminalRowHeight, terminalHeight, initialHeight, padding]);
 
+  const fitTerminal = useCallback(() => {
+    const fitAddon = fitAddonRef.current;
+    if (!fitAddon) return;
+    fitAddon.fit();
+    const dims = fitAddon.proposeDimensions();
+    if (dims) {
+      currentDimensionsRef.current = [dims.cols, dims.rows];
+    }
+  }, []);
+
   const openAutofitTerminal = useCallback(
     (term: Terminal, anchorElem: HTMLDivElement) => {
       const fitAddon = new FitAddon();
+      fitAddonRef.current = fitAddon;
       term.loadAddon(fitAddon);
-      term.open(anchorElem);
+      openTerminal(term, anchorElem, passwordInput);
       const cellHeight =
         (
           term as unknown as {
@@ -175,19 +264,38 @@ function useAutoFitAddon(initialHeight: number, padding: number) {
           }
         )._core?._renderService?.dimensions?.css?.cell?.height ?? 0;
       if (cellHeight) setTerminalRowHeight(cellHeight);
-      fitAddon.fit();
-      const dims = fitAddon.proposeDimensions();
-      if (dims) {
-        currentDimensionsRef.current = [dims.cols, dims.rows];
+      fitTerminal();
+      if (typeof document !== "undefined" && document.fonts) {
+        document.fonts.ready.then(() => fitTerminal());
       }
-      const observer = new ResizeObserver(() => fitAddon.fit());
+      // xterm recalculates font metrics asynchronously after option changes, so
+      // keep re-fitting until the proposed dimensions stabilize.
+      let cancelled = false;
+      let lastKey = "";
+      let stableCount = 0;
+      const stabilize = () => {
+        if (cancelled) return;
+        fitTerminal();
+        const dims = fitAddon.proposeDimensions();
+        const key = dims ? `${dims.cols}x${dims.rows}` : "";
+        stableCount = key === lastKey ? stableCount + 1 : 0;
+        lastKey = key;
+        if (stableCount < 2) window.requestAnimationFrame(stabilize);
+      };
+      const rafId = window.requestAnimationFrame(stabilize);
+      const observer = new ResizeObserver(() => fitTerminal());
       observer.observe(anchorElem);
-      return () => observer.disconnect();
+      return () => {
+        cancelled = true;
+        observer.disconnect();
+        window.cancelAnimationFrame(rafId);
+        if (fitAddonRef.current === fitAddon) fitAddonRef.current = null;
+      };
     },
-    [],
+    [fitTerminal, passwordInput],
   );
 
-  return { terminalHeight, setTerminalHeight, openAutofitTerminal, currentDimensionsRef };
+  return { terminalHeight, setTerminalHeight, openAutofitTerminal, currentDimensionsRef, fitTerminal };
 }
 
 export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult {
@@ -203,6 +311,9 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     lightTheme = DEFAULT_LIGHT_THEME,
     terminalOptions = {},
     bufferReplay = true,
+    directKeyboardInput = false,
+    passwordInput = false,
+    keyboardInputTransform,
   } = options;
 
   const [anchorElem, setAnchorElem] = useState<HTMLDivElement | null>(null);
@@ -213,6 +324,8 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
   });
 
   const terminalInputHandlersRef = useRef<OnTerminalInputFunction[]>([]);
+  const terminalRef = useRef<Terminal | null>(null);
+  const sendInputRef = useRef<(data: string) => void>(() => {});
 
   // Keep latest config in refs so changing them doesn't tear down an active session.
   const baseUrlRef = useRef(baseUrl);
@@ -223,6 +336,12 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
   reconnectDelayRef.current = reconnectDelayMs;
   const bufferReplayRef = useRef(bufferReplay);
   bufferReplayRef.current = bufferReplay;
+  const keyboardInputTransformRef = useRef(keyboardInputTransform);
+  keyboardInputTransformRef.current = keyboardInputTransform;
+
+  const sendInput = useCallback((data: string) => {
+    sendInputRef.current(data);
+  }, []);
 
   const resolveSession = useCallback(async (dimensions: {
     rows: number;
@@ -248,8 +367,8 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     [],
   );
 
-  const { terminalHeight, setTerminalHeight, openAutofitTerminal, currentDimensionsRef } =
-    useAutoFitAddon(initialHeight, padding);
+  const { terminalHeight, setTerminalHeight, openAutofitTerminal, currentDimensionsRef, fitTerminal } =
+    useAutoFitAddon(initialHeight, padding, passwordInput);
   const isDarkMode = usePrefersDarkMode();
   const activeTheme = followColorScheme
     ? isDarkMode
@@ -265,7 +384,9 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
       theme: activeTheme,
       ...terminalOptions,
     });
+    terminalRef.current = term;
     const disposeAutofit = openAutofitTerminal(term, anchorElem);
+    hardenTerminalTextarea(term.textarea);
     const lastUpdateIdRef = { current: 0 };
     const isDisposedRef = { current: false };
 
@@ -277,7 +398,26 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
         }
       }
     }
+    sendInputRef.current = sendData;
     term.onData(sendData);
+    if (directKeyboardInput || keyboardInputTransformRef.current) {
+      term.attachCustomKeyEventHandler((event) => {
+        if (event.type === "keydown") {
+          const transformed = keyboardInputTransformRef.current?.(event);
+          if (transformed !== undefined) {
+            event.preventDefault();
+            if (transformed !== null) sendData(transformed);
+            return false;
+          }
+          if (directKeyboardInput && shouldDirectlySendKey(event)) {
+            event.preventDefault();
+            sendData(event.key);
+            return false;
+          }
+        }
+        return true;
+      });
+    }
 
     let onCommandComplete: ((statusCode: number) => void) | null = null;
     setRunCommand(
@@ -302,6 +442,27 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     });
 
     let connectRetryTimeoutId: ReturnType<typeof setTimeout> | null = null;
+    let postConnectFitFrameId: number | null = null;
+    let postConnectFitTimeoutId: number | null = null;
+
+    function syncConnectedTerminalSize() {
+      fitTerminal();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const [cols, rows] = currentDimensionsRef.current;
+        ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+    }
+
+    function clearPostConnectFitTimers() {
+      if (postConnectFitFrameId !== null) {
+        window.cancelAnimationFrame(postConnectFitFrameId);
+        postConnectFitFrameId = null;
+      }
+      if (postConnectFitTimeoutId !== null) {
+        window.clearTimeout(postConnectFitTimeoutId);
+        postConnectFitTimeoutId = null;
+      }
+    }
 
     function readStoredSessionId(): string | null {
       if (sessionStorageKey === false) return null;
@@ -360,6 +521,10 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
       ws.onopen = () => {
         if (!isDisposedRef.current) setStatus("connected");
+        clearPostConnectFitTimers();
+        syncConnectedTerminalSize();
+        postConnectFitFrameId = window.requestAnimationFrame(syncConnectedTerminalSize);
+        postConnectFitTimeoutId = window.setTimeout(syncConnectedTerminalSize, 80);
       };
 
       ws.onmessage = (event) => {
@@ -410,6 +575,9 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     return () => {
       isDisposedRef.current = true;
       if (connectRetryTimeoutId) clearTimeout(connectRetryTimeoutId);
+      clearPostConnectFitTimers();
+      if (terminalRef.current === term) terminalRef.current = null;
+      if (sendInputRef.current === sendData) sendInputRef.current = () => {};
       term.dispose();
       disposeAutofit();
       ws?.close();
@@ -419,16 +587,32 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     anchorElem,
     openAutofitTerminal,
     currentDimensionsRef,
+    fitTerminal,
     activeTheme,
     resolveSession,
     sessionStorageKey,
   ]);
+
+  useEffect(() => {
+    const term = terminalRef.current;
+    if (!term) return;
+    term.options = { ...terminalOptions };
+    fitTerminal();
+    if (typeof window === "undefined") return;
+    const animationFrame = window.requestAnimationFrame(() => fitTerminal());
+    const timeout = window.setTimeout(() => fitTerminal(), 80);
+    return () => {
+      window.cancelAnimationFrame(animationFrame);
+      window.clearTimeout(timeout);
+    };
+  }, [fitTerminal, terminalOptions]);
 
   return {
     ref: setAnchorElem,
     status,
     sessionId,
     runCommand,
+    sendInput,
     useOnTerminalInput,
     terminalHeight,
     setTerminalHeight,
