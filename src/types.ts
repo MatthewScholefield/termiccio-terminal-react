@@ -48,6 +48,11 @@ export interface CommandFinishTerminalMessage {
   return_code: number;
 }
 
+export interface SessionExitTerminalMessage {
+  type: "session_exit";
+  return_code: number;
+}
+
 export interface ErrorTerminalMessage {
   type: "error";
   error_type: string;
@@ -58,6 +63,7 @@ export type ServerTerminalMessage =
   | OutputTerminalMessage
   | SizeTerminalMessage
   | CommandFinishTerminalMessage
+  | SessionExitTerminalMessage
   | ErrorTerminalMessage;
 
 // ---- REST -------------------------------------------------------------------

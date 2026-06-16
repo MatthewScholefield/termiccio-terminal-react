@@ -76,6 +76,12 @@ export interface UseTerminalOptions {
    */
   createSession?: (dimensions: { rows: number; cols: number }) => Promise<string>;
   /**
+   * Called once when the server signals the underlying PTY process has exited
+   * permanently (a `session_exit` message). Unlike a transient WebSocket drop,
+   * the terminal will not attempt to reconnect after this fires.
+   */
+  onExit?: (returnCode: number) => void;
+  /**
    * localStorage key used to persist the session id across reloads so a PTY can
    * be reconnected. Pass `false` to disable persistence entirely.
    */
@@ -302,6 +308,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
   const {
     baseUrl = DEFAULT_BACKEND_URL,
     createSession,
+    onExit,
     sessionStorageKey = DEFAULT_SESSION_STORAGE_KEY,
     reconnectDelayMs = 1000,
     initialHeight = 320,
@@ -332,6 +339,8 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
   baseUrlRef.current = baseUrl;
   const createSessionRef = useRef(createSession);
   createSessionRef.current = createSession;
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
   const reconnectDelayRef = useRef(reconnectDelayMs);
   reconnectDelayRef.current = reconnectDelayMs;
   const bufferReplayRef = useRef(bufferReplay);
@@ -389,6 +398,9 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     hardenTerminalTextarea(term.textarea);
     const lastUpdateIdRef = { current: 0 };
     const isDisposedRef = { current: false };
+    // Set to true once the server signals a permanent PTY exit; prevents the
+    // onclose handler from scheduling a reconnect and re-launching a session.
+    let sessionExited = false;
 
     function sendData(data: string) {
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -553,6 +565,16 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
             }
             break;
           }
+          case "session_exit": {
+            // The underlying process has exited permanently. Stop the reconnect
+            // loop, drop the persisted session id, and notify the host app.
+            sessionExited = true;
+            storeSessionId(null);
+            if (!isDisposedRef.current) setStatus("exited");
+            onExitRef.current?.(message.return_code);
+            ws?.close();
+            break;
+          }
           case "size":
             break;
         }
@@ -560,8 +582,11 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
       ws.onclose = () => {
         if (isDisposedRef.current) return;
-        setStatus("disconnected");
         ws = null;
+        // A permanent exit was already handled via the session_exit message;
+        // do not reconnect or clobber the "exited" status.
+        if (sessionExited) return;
+        setStatus("disconnected");
         scheduleReconnect();
       };
 
