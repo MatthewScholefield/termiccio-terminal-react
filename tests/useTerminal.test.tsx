@@ -105,6 +105,7 @@ describe("useTerminal snapshot reconnect", () => {
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
 
+
   it("restores snapshots and reconnects from the latest update id", async () => {
     const { result, unmount } = renderHook(() =>
       useTerminal({
@@ -150,4 +151,29 @@ describe("useTerminal snapshot reconnect", () => {
 
     unmount();
   });
+  it("reports rendered output update ids", async () => {
+    const onOutput = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-output",
+        onOutput,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+
+    act(() => {
+      socket.open();
+      socket.receive({ type: "output", data: "hello", update_id: 7 });
+    });
+
+    expect(onOutput).toHaveBeenCalledWith(7);
+    unmount();
+  });
+
 });

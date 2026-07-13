@@ -19,6 +19,7 @@ export const TERMINAL_CONTAINER_CLASS = "termiccio-terminal";
 
 export type RunCommandFunction = (command: string) => Promise<number>;
 export type OnTerminalInputFunction = (input: string) => void;
+export type OnTerminalOutputFunction = (updateId: number) => void;
 export type KeyboardInputTransformFunction = (
   event: KeyboardEvent,
 ) => string | null | undefined;
@@ -125,6 +126,9 @@ export interface UseTerminalOptions {
    * undefined to keep the default terminal behavior.
    */
   keyboardInputTransform?: KeyboardInputTransformFunction;
+  /** Called after fresh or replayed output is written to the terminal. */
+  onOutput?: OnTerminalOutputFunction;
+
 }
 
 export interface UseTerminalResult {
@@ -321,6 +325,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     directKeyboardInput = false,
     passwordInput = false,
     keyboardInputTransform,
+    onOutput,
   } = options;
 
   const [anchorElem, setAnchorElem] = useState<HTMLDivElement | null>(null);
@@ -347,6 +352,8 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
   bufferReplayRef.current = bufferReplay;
   const keyboardInputTransformRef = useRef(keyboardInputTransform);
   keyboardInputTransformRef.current = keyboardInputTransform;
+  const onOutputRef = useRef(onOutput);
+  onOutputRef.current = onOutput;
 
   const sendInput = useCallback((data: string) => {
     sendInputRef.current(data);
@@ -556,6 +563,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
               lastUpdateIdRef.current = message.update_id;
             }
             term.write(message.data);
+            onOutputRef.current?.(message.update_id);
             break;
           }
           case "snapshot": {
