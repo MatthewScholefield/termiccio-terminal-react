@@ -128,6 +128,8 @@ export interface UseTerminalOptions {
   keyboardInputTransform?: KeyboardInputTransformFunction;
   /** Called after fresh or replayed output is written to the terminal. */
   onOutput?: OnTerminalOutputFunction;
+  /** Called after xterm is opened. Return a cleanup function for the extension. */
+  onTerminalReady?: (terminal: Terminal) => void | (() => void);
 
 }
 
@@ -326,6 +328,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     passwordInput = false,
     keyboardInputTransform,
     onOutput,
+    onTerminalReady,
   } = options;
 
   const [anchorElem, setAnchorElem] = useState<HTMLDivElement | null>(null);
@@ -354,6 +357,8 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
   keyboardInputTransformRef.current = keyboardInputTransform;
   const onOutputRef = useRef(onOutput);
   onOutputRef.current = onOutput;
+  const onTerminalReadyRef = useRef(onTerminalReady);
+  onTerminalReadyRef.current = onTerminalReady;
 
   const sendInput = useCallback((data: string) => {
     sendInputRef.current(data);
@@ -403,6 +408,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     terminalRef.current = term;
     const disposeAutofit = openAutofitTerminal(term, anchorElem);
     hardenTerminalTextarea(term.textarea);
+    const cleanupTerminalExtension = onTerminalReadyRef.current?.(term);
     const lastUpdateIdRef = { current: 0 };
     const isDisposedRef = { current: false };
     // Set to true once the server signals a permanent PTY exit; prevents the
@@ -615,6 +621,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
       isDisposedRef.current = true;
       if (connectRetryTimeoutId) clearTimeout(connectRetryTimeoutId);
       clearPostConnectFitTimers();
+      cleanupTerminalExtension?.();
       if (terminalRef.current === term) terminalRef.current = null;
       if (sendInputRef.current === sendData) sendInputRef.current = () => {};
       term.dispose();

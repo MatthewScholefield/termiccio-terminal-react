@@ -105,6 +105,27 @@ describe("useTerminal snapshot reconnect", () => {
     vi.stubGlobal("ResizeObserver", MockResizeObserver);
   });
 
+  it("notifies extensions when the terminal is ready and cleans them up", async () => {
+    const cleanup = vi.fn();
+    const onTerminalReady = vi.fn(() => cleanup);
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-1",
+        onTerminalReady,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+
+    expect(onTerminalReady).toHaveBeenCalledWith(MockTerminal.instances[0]);
+
+    unmount();
+
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
 
   it("restores snapshots and reconnects from the latest update id", async () => {
     const { result, unmount } = renderHook(() =>
