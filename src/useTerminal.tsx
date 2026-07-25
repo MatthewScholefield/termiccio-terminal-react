@@ -144,6 +144,8 @@ export interface UseTerminalResult {
   runCommand: RunCommandFunction;
   /** Send raw input data to the terminal stdin stream. */
   sendInput: (data: string) => void;
+  /** Paste text using xterm's newline normalization and bracketed paste handling. */
+  paste: (data: string) => void;
   /** Subscribe to raw stdin input produced in the terminal. */
   useOnTerminalInput: (
     handler: OnTerminalInputFunction,
@@ -362,6 +364,9 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
   const sendInput = useCallback((data: string) => {
     sendInputRef.current(data);
+  }, []);
+  const paste = useCallback((data: string) => {
+    terminalRef.current?.paste(data);
   }, []);
 
   const resolveSession = useCallback(async (dimensions: {
@@ -659,6 +664,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     sessionId,
     runCommand,
     sendInput,
+    paste,
     useOnTerminalInput,
     terminalHeight,
     setTerminalHeight,

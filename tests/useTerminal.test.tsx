@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => {
     static instances: MockTerminal[] = [];
 
     writes: string[] = [];
+    pastes: string[] = [];
     resetCount = 0;
     textarea = undefined;
     options: unknown;
@@ -22,6 +23,10 @@ const mocks = vi.hoisted(() => {
 
     write(data: string) {
       this.writes.push(data);
+    }
+
+    paste(data: string) {
+      this.pastes.push(data);
     }
 
     reset() {
@@ -125,6 +130,22 @@ describe("useTerminal snapshot reconnect", () => {
     unmount();
 
     expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("pastes through xterm paste handling", async () => {
+    const { result, unmount } = renderHook(() =>
+      useTerminal({ createSession: async () => "session-paste" }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+
+    act(() => result.current.paste("alpha\nbeta"));
+
+    expect(MockTerminal.instances[0].pastes).toEqual(["alpha\nbeta"]);
+    unmount();
   });
 
   it("restores snapshots and reconnects from the latest update id", async () => {
