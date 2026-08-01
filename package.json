@@ -59,13 +59,13 @@
   "devDependencies": {
     "@testing-library/react": "^16.1.0",
     "@types/node": "^22.19.21",
-    "@types/react": "^18.3.18",
-    "@types/react-dom": "^18.3.5",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "jsdom": "^25.0.1",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "tsup": "^8.3.6",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
