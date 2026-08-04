@@ -129,7 +129,7 @@ export interface UseTerminalOptions {
   keyboardInputTransform?: KeyboardInputTransformFunction;
   /** Called after fresh or replayed output is written to the terminal. */
   onOutput?: OnTerminalOutputFunction;
-  /** Called when all acknowledged input has been rendered to the terminal. */
+  /** Called when all acknowledged terminal messages have completed and stdin output has rendered. */
   onSynchronizationChange?: OnSynchronizationChangeFunction;
   /** Called after xterm is opened. Return a cleanup function for the extension. */
   onTerminalReady?: (terminal: Terminal) => void | (() => void);
@@ -421,8 +421,8 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     hardenTerminalTextarea(term.textarea);
     const cleanupTerminalExtension = onTerminalReadyRef.current?.(term);
     const lastUpdateIdRef = { current: 0 };
-    let nextClientInputId = 0;
-    const pendingInputIds = new Set<number>();
+    let nextClientMessageId = 0;
+    const pendingMessageIds = new Set<number>();
     const pendingWatermarks = new Map<number, number>();
     let highestRenderedOutputWatermark = 0;
     let hasRenderedInitialOutput = false;
@@ -439,7 +439,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     function updateSynchronization() {
       if (
         hasRenderedInitialOutput &&
-        pendingInputIds.size === 0 &&
+        pendingMessageIds.size === 0 &&
         [...pendingWatermarks.values()].every(
           (watermark) => highestRenderedOutputWatermark >= watermark,
         )
@@ -453,9 +453,9 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     function recordRenderedOutput(updateId: number) {
       highestRenderedOutputWatermark = Math.max(highestRenderedOutputWatermark, updateId);
       hasRenderedInitialOutput = true;
-      for (const [inputId, watermark] of pendingWatermarks) {
+      for (const [messageId, watermark] of pendingWatermarks) {
         if (watermark <= highestRenderedOutputWatermark) {
-          pendingWatermarks.delete(inputId);
+          pendingWatermarks.delete(messageId);
         }
       }
       onOutputRef.current?.(updateId);
@@ -465,12 +465,18 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     // onclose handler from scheduling a reconnect and re-launching a session.
     let sessionExited = false;
 
+    function sendAcknowledgedMessage(message: Record<string, unknown>) {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+
+      const messageId = ++nextClientMessageId;
+      pendingMessageIds.add(messageId);
+      setSynchronization(false);
+      ws.send(JSON.stringify({ ...message, message_id: messageId }));
+      return true;
+    }
+
     function sendData(data: string) {
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        const inputId = ++nextClientInputId;
-        pendingInputIds.add(inputId);
-        setSynchronization(false);
-        ws.send(JSON.stringify({ type: "stdin", data, input_id: inputId }));
+      if (sendAcknowledgedMessage({ type: "stdin", data })) {
         for (const handler of terminalInputHandlersRef.current) {
           handler(data);
         }
@@ -514,9 +520,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
     term.onResize((size) => {
       currentDimensionsRef.current = [size.cols, size.rows];
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "resize", cols: size.cols, rows: size.rows }));
-      }
+      sendAcknowledgedMessage({ type: "resize", cols: size.cols, rows: size.rows });
     });
 
     let connectRetryTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -525,10 +529,8 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
     function syncConnectedTerminalSize() {
       fitTerminal();
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        const [cols, rows] = currentDimensionsRef.current;
-        ws.send(JSON.stringify({ type: "resize", cols, rows }));
-      }
+      const [cols, rows] = currentDimensionsRef.current;
+      sendAcknowledgedMessage({ type: "resize", cols, rows });
     }
 
     function clearPostConnectFitTimers() {
@@ -630,10 +632,13 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
             term.write(message.data, () => recordRenderedOutput(message.update_id));
             break;
           }
-          case "input_processed": {
-            if (pendingInputIds.delete(message.input_id)) {
-              if (message.output_update_id > highestRenderedOutputWatermark) {
-                pendingWatermarks.set(message.input_id, message.output_update_id);
+          case "message_processed": {
+            if (pendingMessageIds.delete(message.message_id)) {
+              if (
+                message.output_update_id !== null &&
+                message.output_update_id > highestRenderedOutputWatermark
+              ) {
+                pendingWatermarks.set(message.message_id, message.output_update_id);
               }
               updateSynchronization();
             }
@@ -650,7 +655,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
             // The underlying process has exited permanently. Stop the reconnect
             // loop, drop the persisted session id, and notify the host app.
             sessionExited = true;
-            pendingInputIds.clear();
+            pendingMessageIds.clear();
             pendingWatermarks.clear();
             setSynchronization(false);
             storeSessionId(null);
@@ -683,7 +688,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
     return () => {
       isDisposedRef.current = true;
-      pendingInputIds.clear();
+      pendingMessageIds.clear();
       pendingWatermarks.clear();
       setSynchronization(false);
       if (connectRetryTimeoutId) clearTimeout(connectRetryTimeoutId);

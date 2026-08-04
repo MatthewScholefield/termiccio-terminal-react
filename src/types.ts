@@ -11,13 +11,14 @@
 export interface StdinTerminalMessage {
   type: "stdin";
   data: string;
-  input_id: number;
+  message_id: number;
 }
 
 export interface ResizeTerminalMessage {
   type: "resize";
   rows: number;
   cols: number;
+  message_id: number;
 }
 
 export interface GetSizeTerminalMessage {
@@ -52,11 +53,11 @@ export interface SizeTerminalMessage {
   cols: number;
 }
 
-/** Acknowledges stdin processing and identifies the rendered output boundary. */
-export interface InputProcessedTerminalMessage {
-  type: "input_processed";
-  input_id: number;
-  output_update_id: number;
+/** Acknowledges terminal message processing and optionally identifies output to render. */
+export interface MessageProcessedTerminalMessage {
+  type: "message_processed";
+  message_id: number;
+  output_update_id: number | null;
 }
 
 export interface CommandFinishTerminalMessage {
@@ -80,7 +81,7 @@ export type ServerTerminalMessage =
   | OutputTerminalMessage
   | SnapshotTerminalMessage
   | SizeTerminalMessage
-  | InputProcessedTerminalMessage
+  | MessageProcessedTerminalMessage
   | CommandFinishTerminalMessage
   | SessionExitTerminalMessage
   | ErrorTerminalMessage;

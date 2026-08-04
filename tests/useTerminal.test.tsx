@@ -38,7 +38,15 @@ const mocks = vi.hoisted(() => {
 
     onData() {}
 
-    onResize() {}
+    resizeHandler: ((size: { cols: number; rows: number }) => void) | undefined;
+
+    onResize(handler: (size: { cols: number; rows: number }) => void) {
+      this.resizeHandler = handler;
+    }
+
+    resize(cols: number, rows: number) {
+      this.resizeHandler?.({ cols, rows });
+    }
 
     attachCustomKeyEventHandler() {}
   }
@@ -242,13 +250,14 @@ describe("useTerminal snapshot reconnect", () => {
       socket.open();
       result.current.sendInput("first");
       socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 5, rows: 24, cols: 80 });
-      socket.receive({ type: "input_processed", input_id: 1, output_update_id: 7 });
+      socket.receive({ type: "message_processed", message_id: 1, output_update_id: null });
+      socket.receive({ type: "message_processed", message_id: 2, output_update_id: 7 });
     });
 
     expect(socket.sent.map((message) => JSON.parse(message))).toContainEqual({
       type: "stdin",
       data: "first",
-      input_id: 1,
+      message_id: 2,
     });
     expect(onSynchronizationChange).toHaveBeenCalledTimes(1);
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(false);
@@ -281,9 +290,92 @@ describe("useTerminal snapshot reconnect", () => {
       socket.open();
       socket.receive({ type: "output", data: "initial", update_id: 4 });
       result.current.sendInput("silent");
-      socket.receive({ type: "input_processed", input_id: 1, output_update_id: 4 });
+      socket.receive({ type: "message_processed", message_id: 1, output_update_id: null });
+      socket.receive({ type: "message_processed", message_id: 2, output_update_id: 4 });
     });
 
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
+    unmount();
+  });
+
+  it("tracks resize synchronization through its message acknowledgement", async () => {
+    const onSynchronizationChange = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-resize-sync",
+        onSynchronizationChange,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+    const terminal = MockTerminal.instances[0];
+
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 5, rows: 24, cols: 80 });
+      for (const message of socket.sent.map((sent) => JSON.parse(sent)).filter((message) => message.type === "resize")) {
+        socket.receive({ type: "message_processed", message_id: message.message_id, output_update_id: null });
+      }
+    });
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
+
+    act(() => terminal.resize(100, 30));
+    const resize = socket.sent.map((sent) => JSON.parse(sent)).at(-1);
+    expect(resize).toEqual({ type: "resize", cols: 100, rows: 30, message_id: expect.any(Number) });
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(false);
+
+    act(() => {
+      socket.receive({ type: "message_processed", message_id: resize.message_id, output_update_id: null });
+    });
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
+    unmount();
+  });
+
+  it("keeps stdin pending after an independent resize acknowledgement", async () => {
+    const onSynchronizationChange = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-concurrent-sync",
+        onSynchronizationChange,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+    const terminal = MockTerminal.instances[0];
+
+    act(() => {
+      socket.open();
+      socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 5, rows: 24, cols: 80 });
+      for (const message of socket.sent.map((sent) => JSON.parse(sent)).filter((message) => message.type === "resize")) {
+        socket.receive({ type: "message_processed", message_id: message.message_id, output_update_id: null });
+      }
+      result.current.sendInput("first");
+      terminal.resize(100, 30);
+    });
+    const [stdin, resize] = socket.sent
+      .map((sent) => JSON.parse(sent))
+      .filter((message) => message.type === "stdin" || (message.type === "resize" && message.cols === 100));
+    expect(stdin.message_id).not.toBe(resize.message_id);
+
+    act(() => {
+      socket.receive({ type: "message_processed", message_id: resize.message_id, output_update_id: null });
+      socket.receive({ type: "message_processed", message_id: stdin.message_id, output_update_id: 7 });
+    });
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(false);
+
+    act(() => {
+      socket.receive({ type: "output", data: "complete", update_id: 7 });
+    });
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
     unmount();
   });
@@ -316,7 +408,11 @@ describe("useTerminal snapshot reconnect", () => {
     act(() => {
       secondSocket.open();
       secondSocket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 3, rows: 24, cols: 80 });
-      secondSocket.receive({ type: "input_processed", input_id: 1, output_update_id: 3 });
+      firstSocket.receive({ type: "message_processed", message_id: 1, output_update_id: null });
+      secondSocket.receive({ type: "message_processed", message_id: 2, output_update_id: 3 });
+      for (const message of secondSocket.sent.map((sent) => JSON.parse(sent)).filter((message) => message.type === "resize")) {
+        secondSocket.receive({ type: "message_processed", message_id: message.message_id, output_update_id: null });
+      }
     });
 
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);

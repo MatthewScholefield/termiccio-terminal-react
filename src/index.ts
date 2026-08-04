@@ -35,7 +35,7 @@ export type {
   OutputTerminalMessage,
   SnapshotTerminalMessage,
   SizeTerminalMessage,
-  InputProcessedTerminalMessage,
+  MessageProcessedTerminalMessage,
   CommandFinishTerminalMessage,
   ErrorTerminalMessage,
   ServerTerminalMessage,
