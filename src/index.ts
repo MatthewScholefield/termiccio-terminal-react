@@ -7,6 +7,8 @@ export {
   type UseTerminalResult,
   type RunCommandFunction,
   type OnTerminalInputFunction,
+  type OnTerminalOutputFunction,
+  type OnSynchronizationChangeFunction,
   type KeyboardInputTransformFunction,
 } from "./useTerminal";
 
@@ -33,6 +35,7 @@ export type {
   OutputTerminalMessage,
   SnapshotTerminalMessage,
   SizeTerminalMessage,
+  InputProcessedTerminalMessage,
   CommandFinishTerminalMessage,
   ErrorTerminalMessage,
   ServerTerminalMessage,

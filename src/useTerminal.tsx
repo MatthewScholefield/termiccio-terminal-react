@@ -20,6 +20,7 @@ export const TERMINAL_CONTAINER_CLASS = "termiccio-terminal";
 export type RunCommandFunction = (command: string) => Promise<number>;
 export type OnTerminalInputFunction = (input: string) => void;
 export type OnTerminalOutputFunction = (updateId: number) => void;
+export type OnSynchronizationChangeFunction = (isCaughtUp: boolean) => void;
 export type KeyboardInputTransformFunction = (
   event: KeyboardEvent,
 ) => string | null | undefined;
@@ -128,6 +129,8 @@ export interface UseTerminalOptions {
   keyboardInputTransform?: KeyboardInputTransformFunction;
   /** Called after fresh or replayed output is written to the terminal. */
   onOutput?: OnTerminalOutputFunction;
+  /** Called when all acknowledged input has been rendered to the terminal. */
+  onSynchronizationChange?: OnSynchronizationChangeFunction;
   /** Called after xterm is opened. Return a cleanup function for the extension. */
   onTerminalReady?: (terminal: Terminal) => void | (() => void);
 
@@ -330,6 +333,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     passwordInput = false,
     keyboardInputTransform,
     onOutput,
+    onSynchronizationChange,
     onTerminalReady,
   } = options;
 
@@ -359,6 +363,8 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
   keyboardInputTransformRef.current = keyboardInputTransform;
   const onOutputRef = useRef(onOutput);
   onOutputRef.current = onOutput;
+  const onSynchronizationChangeRef = useRef(onSynchronizationChange);
+  onSynchronizationChangeRef.current = onSynchronizationChange;
   const onTerminalReadyRef = useRef(onTerminalReady);
   onTerminalReadyRef.current = onTerminalReady;
 
@@ -415,14 +421,56 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     hardenTerminalTextarea(term.textarea);
     const cleanupTerminalExtension = onTerminalReadyRef.current?.(term);
     const lastUpdateIdRef = { current: 0 };
+    let nextClientInputId = 0;
+    const pendingInputIds = new Set<number>();
+    const pendingWatermarks = new Map<number, number>();
+    let highestRenderedOutputWatermark = 0;
+    let hasRenderedInitialOutput = false;
+    let isCaughtUp = false;
     const isDisposedRef = { current: false };
+    onSynchronizationChangeRef.current?.(false);
+
+    function setSynchronization(isSynchronized: boolean) {
+      if (isCaughtUp === isSynchronized) return;
+      isCaughtUp = isSynchronized;
+      onSynchronizationChangeRef.current?.(isSynchronized);
+    }
+
+    function updateSynchronization() {
+      if (
+        hasRenderedInitialOutput &&
+        pendingInputIds.size === 0 &&
+        [...pendingWatermarks.values()].every(
+          (watermark) => highestRenderedOutputWatermark >= watermark,
+        )
+      ) {
+        setSynchronization(true);
+      } else {
+        setSynchronization(false);
+      }
+    }
+
+    function recordRenderedOutput(updateId: number) {
+      highestRenderedOutputWatermark = Math.max(highestRenderedOutputWatermark, updateId);
+      hasRenderedInitialOutput = true;
+      for (const [inputId, watermark] of pendingWatermarks) {
+        if (watermark <= highestRenderedOutputWatermark) {
+          pendingWatermarks.delete(inputId);
+        }
+      }
+      onOutputRef.current?.(updateId);
+      updateSynchronization();
+    }
     // Set to true once the server signals a permanent PTY exit; prevents the
     // onclose handler from scheduling a reconnect and re-launching a session.
     let sessionExited = false;
 
     function sendData(data: string) {
       if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "stdin", data }));
+        const inputId = ++nextClientInputId;
+        pendingInputIds.add(inputId);
+        setSynchronization(false);
+        ws.send(JSON.stringify({ type: "stdin", data, input_id: inputId }));
         for (const handler of terminalInputHandlersRef.current) {
           handler(data);
         }
@@ -573,14 +621,22 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
             if (message.update_id > lastUpdateIdRef.current) {
               lastUpdateIdRef.current = message.update_id;
             }
-            term.write(message.data);
-            onOutputRef.current?.(message.update_id);
+            term.write(message.data, () => recordRenderedOutput(message.update_id));
             break;
           }
           case "snapshot": {
             term.reset();
             lastUpdateIdRef.current = message.update_id;
-            term.write(message.data);
+            term.write(message.data, () => recordRenderedOutput(message.update_id));
+            break;
+          }
+          case "input_processed": {
+            if (pendingInputIds.delete(message.input_id)) {
+              if (message.output_update_id > highestRenderedOutputWatermark) {
+                pendingWatermarks.set(message.input_id, message.output_update_id);
+              }
+              updateSynchronization();
+            }
             break;
           }
           case "command_finish": {
@@ -594,6 +650,9 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
             // The underlying process has exited permanently. Stop the reconnect
             // loop, drop the persisted session id, and notify the host app.
             sessionExited = true;
+            pendingInputIds.clear();
+            pendingWatermarks.clear();
+            setSynchronization(false);
             storeSessionId(null);
             if (!isDisposedRef.current) setStatus("exited");
             onExitRef.current?.(message.return_code);
@@ -624,6 +683,9 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
     return () => {
       isDisposedRef.current = true;
+      pendingInputIds.clear();
+      pendingWatermarks.clear();
+      setSynchronization(false);
       if (connectRetryTimeoutId) clearTimeout(connectRetryTimeoutId);
       clearPostConnectFitTimers();
       cleanupTerminalExtension?.();

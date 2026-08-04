@@ -21,8 +21,9 @@ const mocks = vi.hoisted(() => {
 
     loadAddon() {}
 
-    write(data: string) {
+    write(data: string, callback?: () => void) {
       this.writes.push(data);
+      callback?.();
     }
 
     paste(data: string) {
@@ -193,7 +194,7 @@ describe("useTerminal snapshot reconnect", () => {
 
     unmount();
   });
-  it("reports rendered output update ids", async () => {
+  it("reports rendered output update ids, including snapshots", async () => {
     const onOutput = vi.fn();
     const { result, unmount } = renderHook(() =>
       useTerminal({
@@ -211,10 +212,114 @@ describe("useTerminal snapshot reconnect", () => {
 
     act(() => {
       socket.open();
+      socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "saved", update_id: 6, rows: 24, cols: 80 });
       socket.receive({ type: "output", data: "hello", update_id: 7 });
     });
 
-    expect(onOutput).toHaveBeenCalledWith(7);
+    expect(onOutput).toHaveBeenNthCalledWith(1, 6);
+    expect(onOutput).toHaveBeenNthCalledWith(2, 7);
+    unmount();
+  });
+
+  it("tracks synchronization through acknowledged input output watermarks", async () => {
+    const onSynchronizationChange = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-sync",
+        onSynchronizationChange,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+
+    act(() => {
+      result.current.sendInput("ignored while connecting");
+      socket.open();
+      result.current.sendInput("first");
+      socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 5, rows: 24, cols: 80 });
+      socket.receive({ type: "input_processed", input_id: 1, output_update_id: 7 });
+    });
+
+    expect(socket.sent.map((message) => JSON.parse(message))).toContainEqual({
+      type: "stdin",
+      data: "first",
+      input_id: 1,
+    });
+    expect(onSynchronizationChange).toHaveBeenCalledTimes(1);
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(false);
+
+    act(() => {
+      socket.receive({ type: "output", data: "complete", update_id: 7 });
+    });
+
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
+    unmount();
+  });
+
+  it("clears silent input at an already rendered watermark", async () => {
+    const onSynchronizationChange = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-silent-sync",
+        onSynchronizationChange,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+
+    act(() => {
+      socket.open();
+      socket.receive({ type: "output", data: "initial", update_id: 4 });
+      result.current.sendInput("silent");
+      socket.receive({ type: "input_processed", input_id: 1, output_update_id: 4 });
+    });
+
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
+    unmount();
+  });
+
+  it("preserves pending synchronization across reconnects", async () => {
+    const onSynchronizationChange = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-reconnect-sync",
+        onSynchronizationChange,
+        reconnectDelayMs: 1,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const firstSocket = MockWebSocket.instances[0];
+
+    act(() => {
+      firstSocket.open();
+      result.current.sendInput("pending");
+      firstSocket.close();
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(2));
+    const secondSocket = MockWebSocket.instances[1];
+
+    act(() => {
+      secondSocket.open();
+      secondSocket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 3, rows: 24, cols: 80 });
+      secondSocket.receive({ type: "input_processed", input_id: 1, output_update_id: 3 });
+    });
+
+    expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
     unmount();
   });
 

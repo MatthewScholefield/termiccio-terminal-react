@@ -11,6 +11,7 @@
 export interface StdinTerminalMessage {
   type: "stdin";
   data: string;
+  input_id: number;
 }
 
 export interface ResizeTerminalMessage {
@@ -51,6 +52,13 @@ export interface SizeTerminalMessage {
   cols: number;
 }
 
+/** Acknowledges stdin processing and identifies the rendered output boundary. */
+export interface InputProcessedTerminalMessage {
+  type: "input_processed";
+  input_id: number;
+  output_update_id: number;
+}
+
 export interface CommandFinishTerminalMessage {
   type: "command_finish";
   command_index: number;
@@ -72,6 +80,7 @@ export type ServerTerminalMessage =
   | OutputTerminalMessage
   | SnapshotTerminalMessage
   | SizeTerminalMessage
+  | InputProcessedTerminalMessage
   | CommandFinishTerminalMessage
   | SessionExitTerminalMessage
   | ErrorTerminalMessage;
