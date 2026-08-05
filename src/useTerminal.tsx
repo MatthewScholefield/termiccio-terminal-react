@@ -13,7 +13,13 @@ import {
   buildWebSocketUrl,
   createTerminalSession,
 } from "./api";
-import type { ServerTerminalMessage } from "./types";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
+import {
+  ResizeSchema,
+  StdinSchema,
+  TerminalMessageSchema,
+  type TerminalMessage,
+} from "./generated/terminal_pb";
 
 export const TERMINAL_CONTAINER_CLASS = "termiccio-terminal";
 
@@ -465,18 +471,27 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     // onclose handler from scheduling a reconnect and re-launching a session.
     let sessionExited = false;
 
-    function sendAcknowledgedMessage(message: Record<string, unknown>) {
+    function sendAcknowledgedMessage(buildMessage: (messageId: number) => TerminalMessage) {
       if (!ws || ws.readyState !== WebSocket.OPEN) return false;
 
       const messageId = ++nextClientMessageId;
       pendingMessageIds.add(messageId);
       setSynchronization(false);
-      ws.send(JSON.stringify({ ...message, message_id: messageId }));
+      ws.send(toBinary(TerminalMessageSchema, buildMessage(messageId)));
       return true;
     }
 
     function sendData(data: string) {
-      if (sendAcknowledgedMessage({ type: "stdin", data })) {
+      if (
+        sendAcknowledgedMessage((messageId) =>
+          create(TerminalMessageSchema, {
+            payload: {
+              case: "stdin",
+              value: create(StdinSchema, { data: new TextEncoder().encode(data), messageId }),
+            },
+          }),
+        )
+      ) {
         for (const handler of terminalInputHandlersRef.current) {
           handler(data);
         }
@@ -520,7 +535,14 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
     term.onResize((size) => {
       currentDimensionsRef.current = [size.cols, size.rows];
-      sendAcknowledgedMessage({ type: "resize", cols: size.cols, rows: size.rows });
+      sendAcknowledgedMessage((messageId) =>
+        create(TerminalMessageSchema, {
+          payload: {
+            case: "resize",
+            value: create(ResizeSchema, { rows: size.rows, cols: size.cols, messageId }),
+          },
+        }),
+      );
     });
 
     let connectRetryTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -530,7 +552,14 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
     function syncConnectedTerminalSize() {
       fitTerminal();
       const [cols, rows] = currentDimensionsRef.current;
-      sendAcknowledgedMessage({ type: "resize", cols, rows });
+      sendAcknowledgedMessage((messageId) =>
+        create(TerminalMessageSchema, {
+          payload: {
+            case: "resize",
+            value: create(ResizeSchema, { rows, cols, messageId }),
+          },
+        }),
+      );
     }
 
     function clearPostConnectFitTimers() {
@@ -598,6 +627,7 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
 
       const updateId = bufferReplayRef.current ? lastUpdateIdRef.current : 0;
       ws = new WebSocket(buildWebSocketUrl(baseUrlRef.current, activeSessionId, updateId));
+      ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
         if (!isDisposedRef.current) setStatus("connected");
@@ -608,59 +638,70 @@ export function useTerminal(options: UseTerminalOptions = {}): UseTerminalResult
       };
 
       ws.onmessage = (event) => {
-        const message = JSON.parse(event.data) as ServerTerminalMessage;
-        switch (message.type) {
+        const message = fromBinary(TerminalMessageSchema, new Uint8Array(event.data));
+        switch (message.payload.case) {
           case "error": {
-            if (message.error_type === "session_not_found") {
+            const error = message.payload.value;
+            if (error.errorType === "session_not_found") {
               storeSessionId(null);
               ws?.close();
             } else {
-              console.error("WebSocket error from server:", message);
+              console.error("WebSocket error from server:", error);
             }
             break;
           }
           case "output": {
-            if (message.update_id > lastUpdateIdRef.current) {
-              lastUpdateIdRef.current = message.update_id;
+            const output = message.payload.value;
+            if (output.updateId > lastUpdateIdRef.current) {
+              lastUpdateIdRef.current = output.updateId;
             }
-            term.write(message.data, () => recordRenderedOutput(message.update_id));
+            term.write(new TextDecoder().decode(output.data), () =>
+              recordRenderedOutput(output.updateId),
+            );
             break;
           }
           case "snapshot": {
+            const snapshot = message.payload.value;
             term.reset();
-            lastUpdateIdRef.current = message.update_id;
-            term.write(message.data, () => recordRenderedOutput(message.update_id));
+            lastUpdateIdRef.current = snapshot.updateId;
+            term.write(new TextDecoder().decode(snapshot.data), () =>
+              recordRenderedOutput(snapshot.updateId),
+            );
             break;
           }
-          case "message_processed": {
-            if (pendingMessageIds.delete(message.message_id)) {
+          case "messageProcessed": {
+            const mp = message.payload.value;
+            if (pendingMessageIds.delete(mp.messageId)) {
+              const outputUpdateId = mp.outputUpdateId !== undefined ? mp.outputUpdateId : null;
               if (
-                message.output_update_id !== null &&
-                message.output_update_id > highestRenderedOutputWatermark
+                outputUpdateId !== null &&
+                outputUpdateId > highestRenderedOutputWatermark
               ) {
-                pendingWatermarks.set(message.message_id, message.output_update_id);
+                pendingWatermarks.set(mp.messageId, outputUpdateId);
               }
               updateSynchronization();
             }
             break;
           }
-          case "command_finish": {
+          case "commandFinish": {
+            const cf = message.payload.value;
             if (onCommandComplete) {
-              onCommandComplete(message.return_code);
+              onCommandComplete(cf.returnCode);
               onCommandComplete = null;
             }
             break;
           }
-          case "session_exit": {
+          case "sessionExit": {
             // The underlying process has exited permanently. Stop the reconnect
             // loop, drop the persisted session id, and notify the host app.
+            const se = message.payload.value;
             sessionExited = true;
             pendingMessageIds.clear();
             pendingWatermarks.clear();
             setSynchronization(false);
             storeSessionId(null);
             if (!isDisposedRef.current) setStatus("exited");
-            onExitRef.current?.(message.return_code);
+            onExitRef.current?.(se.returnCode);
             ws?.close();
             break;
           }

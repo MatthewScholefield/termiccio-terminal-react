@@ -56,7 +56,11 @@
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
   },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.2.0"
+  },
   "devDependencies": {
+    "@bufbuild/protoc-gen-es": "^2.2.0",
     "@testing-library/react": "^16.1.0",
     "@types/node": "^22.19.21",
     "@types/react": "^19.2.18",

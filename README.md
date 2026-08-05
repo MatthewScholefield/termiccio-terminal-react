@@ -143,28 +143,48 @@ Returns `{ ref, status, sessionId, runCommand, useOnTerminalInput, terminalHeigh
 
 ## WebSocket protocol
 
-The hook speaks the `termiccio-terminal` protocol (see the backend README). The message types are typed and re-exported from this package (`ServerTerminalMessage`, `ClientTerminalMessage`, etc.).
+The hook speaks the `termiccio-terminal` protocol over binary WebSocket frames
+(no JSON). Every frame is a serialized protobuf `TerminalMessage` from
+`termiccio-terminal/proto/terminal.proto` (the source of truth lives in the
+sibling backend repo); the generated TypeScript types and schemas are
+re-exported from this package (`TerminalMessage`, `TerminalMessageSchema`, etc.)
+and live in `src/generated/terminal_pb.ts`.
+
+`TerminalMessage` carries a oneof `payload`, so exactly one of the following
+cases is set. Case names use the generated camelCase form (e.g. `getSize`,
+`messageProcessed`, `commandFinish`, `sessionExit`).
 
 ### Client → Server
 
-| `type` | Fields |
-|--------|--------|
-| `stdin` | `data` |
-| `resize` | `rows`, `cols` |
-| `get_size` | |
+| `payload.case` | Fields |
+|----------------|--------|
+| `stdin` | `data` (`bytes` — UTF-8), `message_id` |
+| `resize` | `rows`, `cols`, `message_id` |
+| `getSize` | |
 
 ### Server → Client
 
-| `type` | Fields |
-|--------|--------|
-| `output` | `data`, `update_id` |
+| `payload.case` | Fields |
+|----------------|--------|
+| `output` | `data` (`bytes` — UTF-8), `update_id` |
+| `snapshot` | `format`, `data` (`bytes`), `update_id`, `rows`, `cols` |
 | `size` | `rows`, `cols` |
-| `command_finish` | `command_index`, `return_code` |
+| `commandFinish` | `command_index`, `return_code` |
+| `sessionExit` | `return_code` |
 | `error` | `error_type`, `message` |
+| `messageProcessed` | `message_id`, optional `output_update_id` |
+
+`bytes data` fields hold raw UTF-8. Encode with `TextEncoder` and decode with
+`TextDecoder`; lone surrogates are replaced with U+FFFD, matching the PTY byte
+handling. The optional `output_update_id` on `messageProcessed` maps to JS
+presence: `undefined` when absent (use `mp.outputUpdateId !== undefined ? mp.outputUpdateId : null` to mirror the JSON protocol's explicit `null`).
 
 ## Regenerating protocol types
 
-The `src/types.ts` interfaces mirror the backend's Pydantic models. To regenerate them from the Python schemas, run `pydantic2ts` against `termiccio-terminal` and drop the output into `src/types.ts`. `WriteFileRequest` is intentionally absent — that endpoint was removed from the backend.
+The protobuf types are generated from the sibling `termiccio-terminal` repo's
+`proto/terminal.proto`. Run `./scripts/gen_proto.sh` (requires `protoc` and the
+`@bufbuild/protoc-gen-es` plugin, which `npm install` provides); the output goes
+to `src/generated/terminal_pb.ts`.
 
 ## Development
 

@@ -1,6 +1,23 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useTerminal } from "../src/useTerminal";
+import {
+  CommandFinishSchema,
+  ErrorSchema,
+  GetSizeSchema,
+  MessageProcessedSchema,
+  OutputSchema,
+  ResizeSchema,
+  SessionExitSchema,
+  SizeSchema,
+  SnapshotSchema,
+  StdinSchema,
+  TerminalMessageSchema,
+  type Resize,
+  type Stdin,
+  type TerminalMessage,
+} from "../src/generated/terminal_pb";
 
 const mocks = vi.hoisted(() => {
   class MockTerminal {
@@ -72,9 +89,10 @@ const mocks = vi.hoisted(() => {
     static instances: MockWebSocket[] = [];
 
     readyState = MockWebSocket.CONNECTING;
-    sent: string[] = [];
+    binaryType = "arraybuffer";
+    sent: Uint8Array[] = [];
     onopen: (() => void) | null = null;
-    onmessage: ((event: { data: string }) => void) | null = null;
+    onmessage: ((event: { data: Uint8Array }) => void) | null = null;
     onclose: (() => void) | null = null;
     onerror: ((event: unknown) => void) | null = null;
 
@@ -82,7 +100,7 @@ const mocks = vi.hoisted(() => {
       MockWebSocket.instances.push(this);
     }
 
-    send(data: string) {
+    send(data: Uint8Array) {
       this.sent.push(data);
     }
 
@@ -91,8 +109,8 @@ const mocks = vi.hoisted(() => {
       this.onopen?.();
     }
 
-    receive(message: unknown) {
-      this.onmessage?.({ data: JSON.stringify(message) });
+    receive(message: TerminalMessage) {
+      this.onmessage?.({ data: toBinary(TerminalMessageSchema, message) });
     }
 
     close() {
@@ -109,6 +127,67 @@ const { MockResizeObserver, MockTerminal, MockWebSocket } = mocks;
 
 vi.mock("@xterm/xterm", () => ({ Terminal: mocks.MockTerminal }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: mocks.MockFitAddon }));
+
+function snapshot(data: string, updateId: number): TerminalMessage {
+  return create(TerminalMessageSchema, {
+    payload: {
+      case: "snapshot",
+      value: create(SnapshotSchema, {
+        format: "xterm-serialize-v1",
+        data: new TextEncoder().encode(data),
+        updateId,
+        rows: 24,
+        cols: 80,
+      }),
+    },
+  });
+}
+
+function output(data: string, updateId: number): TerminalMessage {
+  return create(TerminalMessageSchema, {
+    payload: {
+      case: "output",
+      value: create(OutputSchema, {
+        data: new TextEncoder().encode(data),
+        updateId,
+      }),
+    },
+  });
+}
+
+function messageProcessed(messageId: number, outputUpdateId?: number): TerminalMessage {
+  return create(TerminalMessageSchema, {
+    payload: {
+      case: "messageProcessed",
+      value: create(MessageProcessedSchema, {
+        messageId,
+        ...(outputUpdateId !== undefined ? { outputUpdateId } : {}),
+      }),
+    },
+  });
+}
+
+function decodeSent(socket: { sent: Uint8Array[] }): TerminalMessage[] {
+  return socket.sent.map((frame) => fromBinary(TerminalMessageSchema, frame));
+}
+
+function sentStdinMessages(socket: { sent: Uint8Array[] }): Stdin[] {
+  return decodeSent(socket)
+    .filter(
+      (frame): frame is TerminalMessage & { payload: { case: "stdin"; value: Stdin } } =>
+        frame.payload.case === "stdin",
+    )
+    .map((frame) => frame.payload.value);
+}
+
+function sentResizeMessages(socket: { sent: Uint8Array[] }): Resize[] {
+  return decodeSent(socket)
+    .filter(
+      (frame): frame is TerminalMessage & { payload: { case: "resize"; value: Resize } } =>
+        frame.payload.case === "resize",
+    )
+    .map((frame) => frame.payload.value);
+}
 
 describe("useTerminal snapshot reconnect", () => {
   beforeEach(() => {
@@ -179,15 +258,8 @@ describe("useTerminal snapshot reconnect", () => {
     terminal.resetCount = 0;
 
     act(() => {
-      socket.receive({
-        type: "snapshot",
-        format: "xterm-serialize-v1",
-        data: "SNAPSHOT",
-        update_id: 5,
-        rows: 24,
-        cols: 80,
-      });
-      socket.receive({ type: "output", data: "TAIL", update_id: 6 });
+      socket.receive(snapshot("SNAPSHOT", 5));
+      socket.receive(output("TAIL", 6));
     });
 
     expect(terminal.resetCount).toBe(1);
@@ -220,8 +292,8 @@ describe("useTerminal snapshot reconnect", () => {
 
     act(() => {
       socket.open();
-      socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "saved", update_id: 6, rows: 24, cols: 80 });
-      socket.receive({ type: "output", data: "hello", update_id: 7 });
+      socket.receive(snapshot("saved", 6));
+      socket.receive(output("hello", 7));
     });
 
     expect(onOutput).toHaveBeenNthCalledWith(1, 6);
@@ -249,21 +321,20 @@ describe("useTerminal snapshot reconnect", () => {
       result.current.sendInput("ignored while connecting");
       socket.open();
       result.current.sendInput("first");
-      socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 5, rows: 24, cols: 80 });
-      socket.receive({ type: "message_processed", message_id: 1, output_update_id: null });
-      socket.receive({ type: "message_processed", message_id: 2, output_update_id: 7 });
+      socket.receive(snapshot("initial", 5));
+      socket.receive(messageProcessed(1));
+      socket.receive(messageProcessed(2, 7));
     });
 
-    expect(socket.sent.map((message) => JSON.parse(message))).toContainEqual({
-      type: "stdin",
-      data: "first",
-      message_id: 2,
-    });
+    const stdinMessages = sentStdinMessages(socket);
+    expect(stdinMessages).toHaveLength(1);
+    expect(stdinMessages[0].messageId).toBe(2);
+    expect(new TextDecoder().decode(stdinMessages[0].data)).toBe("first");
     expect(onSynchronizationChange).toHaveBeenCalledTimes(1);
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(false);
 
     act(() => {
-      socket.receive({ type: "output", data: "complete", update_id: 7 });
+      socket.receive(output("complete", 7));
     });
 
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
@@ -288,10 +359,10 @@ describe("useTerminal snapshot reconnect", () => {
 
     act(() => {
       socket.open();
-      socket.receive({ type: "output", data: "initial", update_id: 4 });
+      socket.receive(output("initial", 4));
       result.current.sendInput("silent");
-      socket.receive({ type: "message_processed", message_id: 1, output_update_id: null });
-      socket.receive({ type: "message_processed", message_id: 2, output_update_id: 4 });
+      socket.receive(messageProcessed(1));
+      socket.receive(messageProcessed(2, 4));
     });
 
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
@@ -317,20 +388,22 @@ describe("useTerminal snapshot reconnect", () => {
 
     act(() => {
       socket.open();
-      socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 5, rows: 24, cols: 80 });
-      for (const message of socket.sent.map((sent) => JSON.parse(sent)).filter((message) => message.type === "resize")) {
-        socket.receive({ type: "message_processed", message_id: message.message_id, output_update_id: null });
+      socket.receive(snapshot("initial", 5));
+      for (const resize of sentResizeMessages(socket)) {
+        socket.receive(messageProcessed(resize.messageId));
       }
     });
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
 
     act(() => terminal.resize(100, 30));
-    const resize = socket.sent.map((sent) => JSON.parse(sent)).at(-1);
-    expect(resize).toEqual({ type: "resize", cols: 100, rows: 30, message_id: expect.any(Number) });
+    const resize = sentResizeMessages(socket).at(-1);
+    expect(resize?.cols).toBe(100);
+    expect(resize?.rows).toBe(30);
+    expect(resize?.messageId).toEqual(expect.any(Number));
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(false);
 
     act(() => {
-      socket.receive({ type: "message_processed", message_id: resize.message_id, output_update_id: null });
+      socket.receive(messageProcessed(resize!.messageId));
     });
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
     unmount();
@@ -355,26 +428,33 @@ describe("useTerminal snapshot reconnect", () => {
 
     act(() => {
       socket.open();
-      socket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 5, rows: 24, cols: 80 });
-      for (const message of socket.sent.map((sent) => JSON.parse(sent)).filter((message) => message.type === "resize")) {
-        socket.receive({ type: "message_processed", message_id: message.message_id, output_update_id: null });
+      socket.receive(snapshot("initial", 5));
+      for (const resize of sentResizeMessages(socket)) {
+        socket.receive(messageProcessed(resize.messageId));
       }
       result.current.sendInput("first");
       terminal.resize(100, 30);
     });
-    const [stdin, resize] = socket.sent
-      .map((sent) => JSON.parse(sent))
-      .filter((message) => message.type === "stdin" || (message.type === "resize" && message.cols === 100));
-    expect(stdin.message_id).not.toBe(resize.message_id);
+    const sent = decodeSent(socket);
+    const stdinFrame = sent.find((frame) => frame.payload.case === "stdin");
+    const resizeFrame = sent.find(
+      (frame) => frame.payload.case === "resize" && frame.payload.value.cols === 100,
+    );
+    if (stdinFrame?.payload.case !== "stdin" || resizeFrame?.payload.case !== "resize") {
+      throw new Error("missing stdin/resize frames");
+    }
+    const stdinPayload = stdinFrame.payload.value;
+    const resizePayload = resizeFrame.payload.value;
+    expect(stdinPayload.messageId).not.toBe(resizePayload.messageId);
 
     act(() => {
-      socket.receive({ type: "message_processed", message_id: resize.message_id, output_update_id: null });
-      socket.receive({ type: "message_processed", message_id: stdin.message_id, output_update_id: 7 });
+      socket.receive(messageProcessed(resizePayload.messageId));
+      socket.receive(messageProcessed(stdinPayload.messageId, 7));
     });
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(false);
 
     act(() => {
-      socket.receive({ type: "output", data: "complete", update_id: 7 });
+      socket.receive(output("complete", 7));
     });
     expect(onSynchronizationChange).toHaveBeenLastCalledWith(true);
     unmount();
@@ -407,11 +487,11 @@ describe("useTerminal snapshot reconnect", () => {
 
     act(() => {
       secondSocket.open();
-      secondSocket.receive({ type: "snapshot", format: "xterm-serialize-v1", data: "initial", update_id: 3, rows: 24, cols: 80 });
-      firstSocket.receive({ type: "message_processed", message_id: 1, output_update_id: null });
-      secondSocket.receive({ type: "message_processed", message_id: 2, output_update_id: 3 });
-      for (const message of secondSocket.sent.map((sent) => JSON.parse(sent)).filter((message) => message.type === "resize")) {
-        secondSocket.receive({ type: "message_processed", message_id: message.message_id, output_update_id: null });
+      secondSocket.receive(snapshot("initial", 3));
+      firstSocket.receive(messageProcessed(1));
+      secondSocket.receive(messageProcessed(2, 3));
+      for (const resize of sentResizeMessages(secondSocket)) {
+        secondSocket.receive(messageProcessed(resize.messageId));
       }
     });
 
@@ -419,4 +499,297 @@ describe("useTerminal snapshot reconnect", () => {
     unmount();
   });
 
+  it("drops the session on session_not_found errors and does not reconnect", async () => {
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-gone",
+        reconnectDelayMs: 1,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+
+    act(() => {
+      socket.receive(
+        create(TerminalMessageSchema, {
+          payload: {
+            case: "error",
+            value: create(ErrorSchema, {
+              errorType: "session_not_found",
+              message: "no such session",
+            }),
+          },
+        }),
+      );
+    });
+
+    expect(window.localStorage.getItem("termiccio-terminal:session-id")).toBeNull();
+    expect(MockWebSocket.instances).toHaveLength(1);
+    unmount();
+  });
+
+  it("resolves runCommand with the command_finish return code", async () => {
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-command",
+        reconnectDelayMs: 1,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+
+    let promise: Promise<number> | undefined;
+    act(() => {
+      promise = result.current.runCommand("ls");
+    });
+    const stdinMessages = sentStdinMessages(socket);
+    expect(new TextDecoder().decode(stdinMessages.at(-1)!.data)).toBe("ls\r");
+
+    act(() => {
+      socket.receive(
+        create(TerminalMessageSchema, {
+          payload: {
+            case: "commandFinish",
+            value: create(CommandFinishSchema, { commandIndex: 0, returnCode: 42 }),
+          },
+        }),
+      );
+    });
+
+    await expect(promise).resolves.toBe(42);
+    unmount();
+  });
+
+  it("reports session_exit and stops the session", async () => {
+    const onExit = vi.fn();
+    const { result, unmount } = renderHook(() =>
+      useTerminal({
+        createSession: async () => "session-exit",
+        onExit,
+        reconnectDelayMs: 1,
+      }),
+    );
+    const anchor = document.createElement("div");
+
+    await act(async () => {
+      result.current.ref(anchor);
+    });
+    await waitFor(() => expect(MockWebSocket.instances).toHaveLength(1));
+    const socket = MockWebSocket.instances[0];
+    socket.open();
+
+    act(() => {
+      socket.receive(
+        create(TerminalMessageSchema, {
+          payload: {
+            case: "sessionExit",
+            value: create(SessionExitSchema, { returnCode: 7 }),
+          },
+        }),
+      );
+    });
+
+    expect(onExit).toHaveBeenCalledWith(7);
+    expect(result.current.status).toBe("exited");
+    expect(window.localStorage.getItem("termiccio-terminal:session-id")).toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(MockWebSocket.instances).toHaveLength(1);
+    unmount();
+  });
+});
+
+describe("protobuf encoding", () => {
+  it("round-trips every message payload type through toBinary/fromBinary", () => {
+    const cases: { message: TerminalMessage; check: (m: TerminalMessage) => void }[] = [
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "stdin",
+            value: create(StdinSchema, {
+              data: new TextEncoder().encode("echo"),
+              messageId: 7,
+            }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "stdin") throw new Error("expected stdin");
+          expect(new TextDecoder().decode(m.payload.value.data)).toBe("echo");
+          expect(m.payload.value.messageId).toBe(7);
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "resize",
+            value: create(ResizeSchema, { rows: 24, cols: 80, messageId: 8 }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "resize") throw new Error("expected resize");
+          expect(m.payload.value.rows).toBe(24);
+          expect(m.payload.value.cols).toBe(80);
+          expect(m.payload.value.messageId).toBe(8);
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: { case: "getSize", value: create(GetSizeSchema) },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "getSize") throw new Error("expected getSize");
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "output",
+            value: create(OutputSchema, {
+              data: new TextEncoder().encode("out"),
+              updateId: 9,
+            }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "output") throw new Error("expected output");
+          expect(new TextDecoder().decode(m.payload.value.data)).toBe("out");
+          expect(m.payload.value.updateId).toBe(9);
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "snapshot",
+            value: create(SnapshotSchema, {
+              format: "xterm-serialize-v1",
+              data: new TextEncoder().encode("snap"),
+              updateId: 10,
+              rows: 24,
+              cols: 80,
+            }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "snapshot") throw new Error("expected snapshot");
+          expect(m.payload.value.format).toBe("xterm-serialize-v1");
+          expect(new TextDecoder().decode(m.payload.value.data)).toBe("snap");
+          expect(m.payload.value.updateId).toBe(10);
+          expect(m.payload.value.rows).toBe(24);
+          expect(m.payload.value.cols).toBe(80);
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "size",
+            value: create(SizeSchema, { rows: 24, cols: 80 }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "size") throw new Error("expected size");
+          expect(m.payload.value.rows).toBe(24);
+          expect(m.payload.value.cols).toBe(80);
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "messageProcessed",
+            value: create(MessageProcessedSchema, { messageId: 11 }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "messageProcessed") throw new Error("expected messageProcessed");
+          expect(m.payload.value.messageId).toBe(11);
+          expect(m.payload.value.outputUpdateId).toBeUndefined();
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "messageProcessed",
+            value: create(MessageProcessedSchema, { messageId: 12, outputUpdateId: 0 }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "messageProcessed") throw new Error("expected messageProcessed");
+          expect(m.payload.value.messageId).toBe(12);
+          expect(m.payload.value.outputUpdateId).toBe(0);
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "commandFinish",
+            value: create(CommandFinishSchema, { commandIndex: 3, returnCode: -1 }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "commandFinish") throw new Error("expected commandFinish");
+          expect(m.payload.value.commandIndex).toBe(3);
+          expect(m.payload.value.returnCode).toBe(-1);
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "sessionExit",
+            value: create(SessionExitSchema, { returnCode: -2 }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "sessionExit") throw new Error("expected sessionExit");
+          expect(m.payload.value.returnCode).toBe(-2);
+        },
+      },
+      {
+        message: create(TerminalMessageSchema, {
+          payload: {
+            case: "error",
+            value: create(ErrorSchema, {
+              errorType: "session_not_found",
+              message: "gone",
+            }),
+          },
+        }),
+        check: (m) => {
+          if (m.payload.case !== "error") throw new Error("expected error");
+          expect(m.payload.value.errorType).toBe("session_not_found");
+          expect(m.payload.value.message).toBe("gone");
+        },
+      },
+    ];
+
+    for (const { message, check } of cases) {
+      const decoded = fromBinary(TerminalMessageSchema, toBinary(TerminalMessageSchema, message));
+      check(decoded);
+    }
+  });
+
+  it("encodes lone surrogates without throwing and decodes them as U+FFFD", () => {
+    expect(() => new TextEncoder().encode("\uD800")).not.toThrow();
+    const frame = create(TerminalMessageSchema, {
+      payload: {
+        case: "stdin",
+        value: create(StdinSchema, {
+          data: new TextEncoder().encode("a\uD800b"),
+          messageId: 1,
+        }),
+      },
+    });
+    const decoded = fromBinary(TerminalMessageSchema, toBinary(TerminalMessageSchema, frame));
+    if (decoded.payload.case !== "stdin") throw new Error("expected stdin");
+    expect(new TextDecoder().decode(decoded.payload.value.data)).toBe("a\uFFFDb");
+  });
 });

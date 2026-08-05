@@ -1,90 +1,11 @@
 /**
- * WebSocket protocol types for the `termiccio-terminal` backend.
+ * REST API types for the `termiccio-terminal` backend.
  *
- * These mirror the Pydantic models exported by the backend library and are
- * discriminated by a `type` field. They can be regenerated from the backend's
- * Python schemas with `pydantic2ts`; see the README for details.
+ * WebSocket frames are no longer JSON; they are binary Protocol Buffers
+ * defined by the sibling `termiccio-terminal` repo's
+ * `proto/terminal.proto`. The generated message types and schemas are
+ * re-exported from `./generated/terminal_pb` (see `scripts/gen_proto.sh`).
  */
-
-// ---- Client -> Server -------------------------------------------------------
-
-export interface StdinTerminalMessage {
-  type: "stdin";
-  data: string;
-  message_id: number;
-}
-
-export interface ResizeTerminalMessage {
-  type: "resize";
-  rows: number;
-  cols: number;
-  message_id: number;
-}
-
-export interface GetSizeTerminalMessage {
-  type: "get_size";
-}
-
-export type ClientTerminalMessage =
-  | StdinTerminalMessage
-  | ResizeTerminalMessage
-  | GetSizeTerminalMessage;
-
-// ---- Server -> Client -------------------------------------------------------
-
-export interface OutputTerminalMessage {
-  type: "output";
-  data: string;
-  update_id: number;
-}
-
-export interface SnapshotTerminalMessage {
-  type: "snapshot";
-  format: "xterm-serialize-v1";
-  data: string;
-  update_id: number;
-  rows: number;
-  cols: number;
-}
-
-export interface SizeTerminalMessage {
-  type: "size";
-  rows: number;
-  cols: number;
-}
-
-/** Acknowledges terminal message processing and optionally identifies output to render. */
-export interface MessageProcessedTerminalMessage {
-  type: "message_processed";
-  message_id: number;
-  output_update_id: number | null;
-}
-
-export interface CommandFinishTerminalMessage {
-  type: "command_finish";
-  command_index: number;
-  return_code: number;
-}
-
-export interface SessionExitTerminalMessage {
-  type: "session_exit";
-  return_code: number;
-}
-
-export interface ErrorTerminalMessage {
-  type: "error";
-  error_type: string;
-  message: string;
-}
-
-export type ServerTerminalMessage =
-  | OutputTerminalMessage
-  | SnapshotTerminalMessage
-  | SizeTerminalMessage
-  | MessageProcessedTerminalMessage
-  | CommandFinishTerminalMessage
-  | SessionExitTerminalMessage
-  | ErrorTerminalMessage;
 
 // ---- REST -------------------------------------------------------------------
 
